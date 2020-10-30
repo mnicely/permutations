@@ -107,6 +107,8 @@ __global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output
 
     for ( int gid = tid; gid < r_n; gid += stride ) {
 
+		// printf("%d %d %d\n", gid, tid, threadIdx.x);
+
         // Reset shared memory
         for ( int i = 0; i < ws; i++ ) {
             s[i * TPB + threadIdx.x] = 0;
@@ -117,32 +119,30 @@ __global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output
         if ( gid < n ) {
 
             int quo { gid };
-            s[tid * ws] = 0;
+            s[block.thread_rank() * ws] = 0;
 
 #pragma unroll P
             for ( int i = 2; i <= P; i++ ) {
-                s[tid * ws + ( i - 1 )] = static_cast<uint>( fmodf( quo, i ) );
+                s[block.thread_rank() * ws + ( i - 1 )] = static_cast<uint>( fmodf( quo, i ) );
                 quo                     = static_cast<int>( __fdividef( quo, i ) );
             }
         }
-        tile32.sync( );
-
-        if ( tid == 0 )
-            printf( "\n" );
+        block.sync( );
 
         // Compute lehmer code : Each set gets a single warp
-        for ( int w = tile32.meta_group_rank( ); w < n; w += tile32.meta_group_size( ) ) {
+        for ( int w = tile32.meta_group_rank( ); w < TPB; w += tile32.meta_group_size( ) ) {
 
-            if ( tile32.thread_rank( ) == 0 )
-                printf( "%d: %d\n", tile32.thread_rank( ), w );
             uint key { tile32.thread_rank( ) };
 
             for ( int p = P - 1; p >= 0; p-- ) {
-                uint rem { s[w * ws + p] };
-                uint delta { 1 };
+				uint rem { s[w * ws + p] };
+				
+				uint delta { 1 };
+				
+				__syncwarp();
                 if ( tile32.thread_rank( ) == rem ) {
-                    s[w * ws + p] = key;
-                }
+					s[w * ws + p] = key;
+				}
 
                 if ( tile32.thread_rank( ) >= rem ) {
                     auto active = cg::coalesced_threads( );
@@ -152,17 +152,17 @@ __global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output
             }
         }
         block.sync( );
-        if ( tid < n )
+        if ( gid < n )
             printf( "L %d: %d%d%d%d%d%d%d%d\n",
-					tid,
-					s[tid * ws + 7],
-					s[tid * ws + 6],
-					s[tid * ws + 5],
-                    s[tid * ws + 4],
-                    s[tid * ws + 3],
-                    s[tid * ws + 2],
-                    s[tid * ws + 1],
-                    s[tid * ws + 0] );
+					gid,
+					s[block.thread_rank() * ws + 7],
+					s[block.thread_rank() * ws + 6],
+					s[block.thread_rank() * ws + 5],
+                    s[block.thread_rank() * ws + 4],
+                    s[block.thread_rank() * ws + 3],
+                    s[block.thread_rank() * ws + 2],
+                    s[block.thread_rank() * ws + 1],
+                    s[block.thread_rank() * ws + 0] );
 
         // Store
     }
@@ -207,7 +207,7 @@ int main( int argc, char **argv ) {
 
     using dtype = char;
 
-    const uint P { 4 };               // Cap at 32
+    const uint P { 6 };               // Cap at 32
     size_t     N { factorial( P ) };  // Number of sets, each set P values
 
     printf( "N = %lu\n", N );
@@ -237,15 +237,15 @@ int main( int argc, char **argv ) {
         std::printf( "%d ", i );
     std::printf( "\n" );
 
-    printf( "\nCPU\n" );
-    findPermutations( h_seq, P );
-    printf( "\n" );
+    // printf( "\nCPU\n" );
+    // findPermutations( h_seq, P );
+    // printf( "\n" );
 
     // std::vector<dtype>    h_key( P );
     std::vector<dtype>    h_data( N * P );
     UniquePagedPtr<dtype> d_data { PagedAllocate<dtype>( N * P ) };
 
-    int r_N { static_cast<int>( N / tpb ) + 1 * tpb };
+    int r_N { ( static_cast<int>( N / tpb ) + 1 ) * tpb };
     printf( "r_N = %d\n", r_N );
 
     void *args[] { &N, &r_N, &d_data };
