@@ -34,6 +34,8 @@
  */
 
 #include <algorithm>
+#include <cassert>
+#include <chrono>
 #include <memory>
 #include <numeric>
 #include <vector>
@@ -94,23 +96,22 @@ constexpr size_t factorial( const size_t &n ) {
 constexpr int tpb { 256 };
 constexpr int ws { 32 };
 
-template<typename T, uint TPB, uint P>
-__global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output ) {
+template<typename T, typename U, uint TPB, uint P, size_t LAST_BLOCK>
+__global__ void __launch_bounds__( TPB ) permute_shared( const U n, const U r_n, T *output ) {
 
     const auto block { cg::this_thread_block( ) };
     const auto tile32 { cg::tiled_partition<ws>( block ) };
 
-    unsigned int tid { blockIdx.x * blockDim.x + threadIdx.x };
-    unsigned int stride { blockDim.x * gridDim.x };
+    U tid { blockIdx.x * blockDim.x + threadIdx.x };
+    U stride { blockDim.x * gridDim.x };
+    U block_id { blockIdx.x };
 
-    __shared__ uint s[ws * TPB];
+    __shared__ unsigned char s[P * TPB];
 
-    for ( int gid = tid; gid < r_n; gid += stride ) {
-
-		// printf("%d %d %d\n", gid, tid, threadIdx.x);
+    for ( U gid = tid; gid < r_n; gid += stride ) {
 
         // Reset shared memory
-        for ( int i = 0; i < ws; i++ ) {
+        for ( U i = 0; i < P; i++ ) {
             s[i * TPB + threadIdx.x] = 0;
         }
         block.sync( );
@@ -118,13 +119,13 @@ __global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output
         // Compute factoradic
         if ( gid < n ) {
 
-            int quo { gid };
-            s[block.thread_rank() * ws] = 0;
+            U quo { gid };
+            s[block.thread_rank( ) * P + ( P - 1 )] = 0;
 
-#pragma unroll P
+#pragma unroll
             for ( int i = 2; i <= P; i++ ) {
-                s[block.thread_rank() * ws + ( i - 1 )] = static_cast<uint>( fmodf( quo, i ) );
-                quo                     = static_cast<int>( __fdividef( quo, i ) );
+                s[block.thread_rank( ) * P + ( P - i )] = quo % i;
+                quo /= i;
             }
         }
         block.sync( );
@@ -134,37 +135,75 @@ __global__ void permute_cuda( const int n, const int r_n, T *__restrict__ output
 
             uint key { tile32.thread_rank( ) };
 
-            for ( int p = P - 1; p >= 0; p-- ) {
-				uint rem { s[w * ws + p] };
-				
-				uint delta { 1 };
-				
-				__syncwarp();
+#pragma unroll
+            for ( int p = 0; p < P; p++ ) {
+                uint rem { s[w * P + p] };
+
+                __syncwarp( );
+
                 if ( tile32.thread_rank( ) == rem ) {
-					s[w * ws + p] = key;
-				}
+                    s[w * P + p] = key;
+                }
 
                 if ( tile32.thread_rank( ) >= rem ) {
                     auto active = cg::coalesced_threads( );
-                    key         = active.shfl_down( key, delta );
+                    key         = active.shfl_down( key, 1 );
                     active.sync( );
                 }
             }
         }
         block.sync( );
-        if ( gid < n )
-            printf( "L %d: %d%d%d%d%d%d%d%d\n",
-					gid,
-					s[block.thread_rank() * ws + 7],
-					s[block.thread_rank() * ws + 6],
-					s[block.thread_rank() * ws + 5],
-                    s[block.thread_rank() * ws + 4],
-                    s[block.thread_rank() * ws + 3],
-                    s[block.thread_rank() * ws + 2],
-                    s[block.thread_rank() * ws + 1],
-                    s[block.thread_rank() * ws + 0] );
+
+        // if ( gid == ( n - 10 ) ) {
+        //     for ( int g = 0; g < 10; g++ ) {
+        //         printf( "%d: %d ", gid + g, ( block.thread_rank( ) + g ) );
+        //         for ( int p = 0; p < P; p++ ) {
+        //             printf( "%d", s[( block.thread_rank( ) + g ) * P + p] );
+        //         }
+        //         printf( "\n" );
+        //     }
+        // }
+
+        if ( block_id != LAST_BLOCK ) {
+#pragma unroll
+            for ( int p = 0; p < P; p++ ) {
+                output[( block_id * P * TPB ) + ( p * TPB ) + block.thread_rank( )] = s[p * TPB + block.thread_rank( )];
+            }
+        } else {
+            uint block_size { TPB - ( r_n - n ) };
+            // if ( block.thread_rank( ) == 0 )
+            //     printf( "block_size %d\n", TPB - ( r_n - n ) );
+
+            // if ( block.thread_rank( ) < block_size )
+            //     printf( "%d: %d%d%d%d%d%d\n",
+            //             block.thread_rank( ),
+            //             s[block.thread_rank( ) * P + 0],
+            //             s[block.thread_rank( ) * P + 1],
+            //             s[block.thread_rank( ) * P + 2],
+            //             s[block.thread_rank( ) * P + 3],
+            //             s[block.thread_rank( ) * P + 4],
+            //             s[block.thread_rank( ) * P + 5] );
+
+            if ( block.thread_rank( ) < block_size ) {
+#pragma unroll
+                for ( int p = 0; p < P; p++ ) {
+                    output[( block_id * P * TPB ) + ( p * block_size ) + block.thread_rank( )] =
+                        s[p * block_size + block.thread_rank( )];
+                }
+            }
+        }
+
+        // if ( gid > ( n - 10 ) && gid < n )
+        // printf( "L %d: %d%d%d%d\n",
+        //         gid,
+        //         s[block.thread_rank( ) * ws + 3],
+        //         s[block.thread_rank( ) * ws + 2],
+        //         s[block.thread_rank( ) * ws + 1],
+        //         s[block.thread_rank( ) * ws + 0] );
 
         // Store
+
+        block_id += gridDim.x;
     }
 }
 
@@ -189,26 +228,45 @@ template<typename T>
 using UniquePagedPtr = std::unique_ptr<T, PagedMemoryDeleter<T>>;
 
 // Function to find the permutations
-template<typename T>
-void findPermutations( std::vector<T> a, int n ) {
+template<typename T, uint P>
+void findPermutations( const int &n, std::vector<T> &a, std::vector<T> &key ) {
     // Sort the given array
     std::sort( a.begin( ), a.end( ) );
 
     // Find all possible permutations
+    size_t count {};
     do {
-        for ( auto &i : a )
-            std::printf( "%d", i );
-        std::printf( "\n" );
+        for ( int i = 0; i < a.size( ); i++ ) {
+            key[count * P + i] = a[i];
+        }
+        count++;
+    } while ( next_permutation( a.begin( ), a.end( ) ) );
+}
+
+template<typename T, uint P>
+void verify( const int &n, std::vector<T> &a, const T *data ) {
+    // Sort the given array
+    std::sort( a.begin( ), a.end( ) );
+
+    // Find all possible permutations
+    size_t count {};
+    do {
+        for ( int i = 0; i < a.size( ); i++ ) {
+            if ( data[count * P + i] != a[i] ) {
+                printf( "%lu: %d: %d %d\n", count, i, data[count * P + i], a[i] );
+            }
+        }
+        count++;
     } while ( next_permutation( a.begin( ), a.end( ) ) );
 }
 
 /* Main */
 int main( int argc, char **argv ) {
 
-    using dtype = char;
+    using dtype = unsigned char;
 
-    const uint P { 6 };               // Cap at 32
-    size_t     N { factorial( P ) };  // Number of sets, each set P values
+    const uint   P { 10 };               // Cap at 32
+    const size_t N { factorial( P ) };  // Number of sets, each set P values
 
     printf( "N = %lu\n", N );
 
@@ -226,39 +284,57 @@ int main( int argc, char **argv ) {
     blocks_per_grid = sm_count * 32;
     // blocks_per_grid = 1;
 
-    // Determine how much shared memory is required
-    size_t shared_size { P * tpb * sizeof( int ) };
+    std::vector<dtype> h_key( N * P );
 
     std::vector<dtype> h_seq( P );
     std::iota( std::begin( h_seq ), std::end( h_seq ), 0 );
 
-    std::printf( "\nKey\n" );
+    std::printf( "\nSeq\n" );
     for ( auto &i : h_seq )
         std::printf( "%d ", i );
     std::printf( "\n" );
 
     // printf( "\nCPU\n" );
-    // findPermutations( h_seq, P );
-    // printf( "\n" );
+    // auto start = std::chrono::high_resolution_clock::now( );
 
-    // std::vector<dtype>    h_key( P );
+    // findPermutations<dtype, P>( N, h_seq, h_key );
+
+    // auto                                      stop           = std::chrono::high_resolution_clock::now( );
+    // std::chrono::duration<double, std::milli> elapsed_cpu_ms = stop - start;
+    // std::printf( "%0.2f ms\n", elapsed_cpu_ms.count( ) );
+
+    // for ( int i = 0; i < N; i++ ) {
+    //     for ( int j = 0; j < P; j++ ) {
+    //         std::printf( "%d", h_key[i * P + j] );
+    //     }
+    //     std::printf( "\n" );
+    // }
+
+    // std::printf( "\n" );
+
     std::vector<dtype>    h_data( N * P );
     UniquePagedPtr<dtype> d_data { PagedAllocate<dtype>( N * P ) };
 
-    int r_N { ( static_cast<int>( N / tpb ) + 1 ) * tpb };
-    printf( "r_N = %d\n", r_N );
+    const size_t num_blocks { static_cast<size_t>( N / tpb ) };
+    const size_t pad_N { ( num_blocks + 1 ) * tpb };
+    printf( "r_N = %lu: %lu\n", pad_N, num_blocks );
 
-    void *args[] { &N, &r_N, &d_data };
+    void *args[] { const_cast<size_t *>( &N ), const_cast<size_t *>( &pad_N ), &d_data };
 
-    CUDA_RT_CALL( cudaLaunchKernel( reinterpret_cast<void *>( &permute_cuda<dtype, tpb, P> ),
-                                    blocks_per_grid,
-                                    threads_per_block,
-                                    args,
-                                    shared_size,
-                                    cuda_stream ) );
+    for ( int i = 0; i < 1; i++ ) {
+        if ( P < 13 ) {
+            CUDA_RT_CALL(
+                cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<dtype, uint, tpb, P, num_blocks> ),
+                                  blocks_per_grid,
+                                  threads_per_block,
+                                  args,
+                                  0,
+                                  cuda_stream ) );
+        }
+    }
 
-    // CUDA_RT_CALL( cudaMemcpyAsync(
-    //     h_data.data( ), d_data.get( ), N * P * sizeof( dtype ), cudaMemcpyDeviceToHost, cuda_stream ) );
+    CUDA_RT_CALL( cudaMemcpyAsync(
+        h_data.data( ), d_data.get( ), N * P * sizeof( dtype ), cudaMemcpyDeviceToHost, cuda_stream ) );
 
     CUDA_RT_CALL( cudaDeviceSynchronize( ) );
 
@@ -269,6 +345,8 @@ int main( int argc, char **argv ) {
     //     }
     //     std::printf( "\n" );
     // }
+
+    verify<dtype, P>(N, h_seq, h_data.data( ));
 
     CUDA_RT_CALL( cudaStreamDestroy( cuda_stream ) );
 
