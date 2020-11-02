@@ -326,7 +326,7 @@ int main( int argc, char **argv ) {
 
     CUDA_RT_CALL( cudaMemcpyAsync( h_data.data( ), d_data.get( ), size_bytes, cudaMemcpyDeviceToHost, cuda_stream ) );
 
-    CUDA_RT_CALL( cudaDeviceSynchronize( ) );
+    CUDA_RT_CALL( cudaStreamSynchronize( cuda_stream ) );
 
     std::printf( "\nGPU\n" );
     for ( int i = ( N - 10 ); i < N; i++ ) {
