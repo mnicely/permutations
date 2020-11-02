@@ -123,7 +123,7 @@ __launch_bounds__( TPB, 4 )
         }
 
         size_t return_loc { block_id * P * TPB };
-        uint   block_size = ( block_id != LAST_BLOCK ) ? TPB : TPB - ( r_n - n );
+        uint   block_size = ( block_id != LAST_BLOCK ) ? TPB : TPB - ( pad_n - n );
 
         block.sync( );
 
@@ -199,7 +199,7 @@ using UniquePagedPtr = std::unique_ptr<T, PagedMemoryDeleter<T>>;
 
 // Function to find the permutations
 template<typename T, uint P>
-void findPermutations( const int &n, std::vector<T> &a, std::vector<T> &key ) {
+void findPermutations( const size_t &n, std::vector<T> &a, std::vector<T> &key ) {
     // Sort the given array
     std::sort( a.begin( ), a.end( ) );
 
@@ -214,7 +214,7 @@ void findPermutations( const int &n, std::vector<T> &a, std::vector<T> &key ) {
 }
 
 template<typename T, uint P>
-void verify( const int &n, std::vector<T> &a, const T *data ) {
+void verify( const size_t &n, std::vector<T> &a, const T *data ) {
     // Sort the given array
     std::sort( a.begin( ), a.end( ) );
 
@@ -235,7 +235,7 @@ int main( int argc, char **argv ) {
 
     using dtype = unsigned char;
 
-    const uint   P { 12 };              // Cap at 32
+    const uint   P { 13 };              // Cap at 32
     const size_t N { factorial( P ) };  // Number of sets, each set P values
 
     printf( "N = %lu\n", N );
@@ -272,19 +272,17 @@ int main( int argc, char **argv ) {
     std::chrono::duration<double, std::milli> elapsed_cpu_ms = stop - start;
     std::printf( "%0.2f ms\n", elapsed_cpu_ms.count( ) );
 
-    for ( int i = ( N - 10 ); i < N; i++ ) {
+    for ( size_t i = ( N - 10 ); i < N; i++ ) {
         for ( int j = 0; j < P; j++ ) {
             std::printf( "%d", h_key[i * P + j] );
         }
         std::printf( "\n" );
     }
-
     std::printf( "\n" );
 
     size_t                size_bytes { N * P * sizeof( dtype ) };
     std::vector<dtype>    h_data( N * P );
     UniquePagedPtr<dtype> d_data { PagedAllocate<dtype>( N * P ) };
-    // CUDA_RT_CALL( cudaMemsetAsync( d_data.get( ), 0, size_bytes, cuda_stream ) );
 
     const size_t num_blocks { static_cast<size_t>( N / tpb ) };
     const size_t pad_N { ( num_blocks + 1 ) * tpb };
@@ -329,7 +327,7 @@ int main( int argc, char **argv ) {
     CUDA_RT_CALL( cudaStreamSynchronize( cuda_stream ) );
 
     std::printf( "\nGPU\n" );
-    for ( int i = ( N - 10 ); i < N; i++ ) {
+    for ( size_t i = ( N - 10 ); i < N; i++ ) {
         for ( int j = 0; j < P; j++ ) {
             std::printf( "%d", h_data[i * P + j] );
         }
