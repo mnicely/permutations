@@ -93,18 +93,18 @@ constexpr size_t factorial( const size_t &n ) {
     return ( n <= 1 ) ? 1 : ( n * factorial( n - 1 ) );
 }
 
-constexpr int tpb { 256 };
+constexpr int tpb { 512 };
 
 template<uint TPB, uint WS, uint P, size_t LAST_BLOCK>
 __global__ void
 #if __CUDA_ARCH__ == 750
-__launch_bounds__( TPB, 4 )
+__launch_bounds__( TPB, 2 )
 #elif __CUDA_ARCH__ == 860
-__launch_bounds__( TPB, 6 )
+__launch_bounds__( TPB, 3 )
 #else
-__launch_bounds__( TPB, 8 )
+__launch_bounds__( TPB, 4 )
 #endif
-    permute_shared( const size_t n, const size_t r_n, unsigned char *output ) {
+    permute_shared( const size_t n, const size_t pad_n, unsigned char *output ) {
 
     const auto block { cg::this_thread_block( ) };
     const auto tile32 { cg::tiled_partition<WS>( block ) };
@@ -115,7 +115,7 @@ __launch_bounds__( TPB, 8 )
 
     __shared__ unsigned char s_data[P * TPB];
 
-    for ( size_t gid = tid; gid < r_n; gid += stride ) {
+    for ( size_t gid = tid; gid < pad_n; gid += stride ) {
 
         // Reset shared memory
         for ( int i = 0; i < P; i++ ) {
@@ -288,7 +288,7 @@ int main( int argc, char **argv ) {
 
     const size_t num_blocks { static_cast<size_t>( N / tpb ) };
     const size_t pad_N { ( num_blocks + 1 ) * tpb };
-    printf( "r_N = %lu: %lu\n", pad_N, num_blocks );
+    printf( "pad_N = %lu: %lu\n", pad_N, num_blocks );
 
     void *args[] { const_cast<size_t *>( &N ), const_cast<size_t *>( &pad_N ), &d_data };
 
