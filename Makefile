@@ -1,6 +1,6 @@
 NVCC	:=nvcc --cudart=static -ccbin g++
 CFLAGS	:=-O3 -std=c++14 -lineinfo -Xptxas -v
-ARCHES	:=-gencode arch=compute_70,code=\"compute_70,sm_70\" -gencode arch=compute_75,code=\"compute_75,sm_75\" -gencode arch=compute_80,code=\"compute_80,sm_80\"
+ARCHES	:=-gencode arch=compute_70,code=\"compute_70,sm_70\" -gencode arch=compute_75,code=\"compute_75,sm_75\" -gencode arch=compute_80,code=\"compute_80,sm_80\" -gencode arch=compute_86,code=\"compute_86,sm_86\"
 INC_DIR	:=
 LIB_DIR	:=
 LIBS	:=

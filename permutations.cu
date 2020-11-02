@@ -94,13 +94,20 @@ constexpr size_t factorial( const size_t &n ) {
 }
 
 constexpr int tpb { 256 };
-constexpr int ws { 32 };
 
-template<typename T, typename U, uint TPB, uint P, size_t LAST_BLOCK>
-__global__ void __launch_bounds__( TPB ) permute_shared( const size_t n, const size_t r_n, T *output ) {
+template<uint TPB, uint WS, uint P, size_t LAST_BLOCK>
+__global__ void
+#if __CUDA_ARCH__ == 750
+__launch_bounds__( TPB, 4 )
+#elif __CUDA_ARCH__ == 860
+__launch_bounds__( TPB, 6 )
+#else
+__launch_bounds__( TPB, 8 )
+#endif
+    permute_shared( const size_t n, const size_t r_n, unsigned char *output ) {
 
     const auto block { cg::this_thread_block( ) };
-    const auto tile32 { cg::tiled_partition<ws>( block ) };
+    const auto tile32 { cg::tiled_partition<WS>( block ) };
 
     size_t tid { blockIdx.x * blockDim.x + threadIdx.x };
     size_t stride { blockDim.x * gridDim.x };
@@ -115,7 +122,6 @@ __global__ void __launch_bounds__( TPB ) permute_shared( const size_t n, const s
             s_data[i * TPB + block.thread_rank( )] = 0;
         }
 
-        // Store
         size_t return_loc { block_id * P * TPB };
         uint   block_size = ( block_id != LAST_BLOCK ) ? TPB : TPB - ( r_n - n );
 
@@ -287,14 +293,34 @@ int main( int argc, char **argv ) {
     void *args[] { const_cast<size_t *>( &N ), const_cast<size_t *>( &pad_N ), &d_data };
 
     for ( int i = 0; i < 1; i++ ) {
-        if ( P < 13 ) {
-            CUDA_RT_CALL(
-                cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<dtype, uint, tpb, P, num_blocks> ),
-                                  blocks_per_grid,
-                                  threads_per_block,
-                                  args,
-                                  0,
-                                  cuda_stream ) );
+        if ( P <= 4 ) {
+            CUDA_RT_CALL( cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<tpb, 4, P, num_blocks> ),
+                                            blocks_per_grid,
+                                            threads_per_block,
+                                            args,
+                                            0,
+                                            cuda_stream ) );
+        } else if ( P <= 8 ) {
+            CUDA_RT_CALL( cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<tpb, 8, P, num_blocks> ),
+                                            blocks_per_grid,
+                                            threads_per_block,
+                                            args,
+                                            0,
+                                            cuda_stream ) );
+        } else if ( P <= 16 ) {
+            CUDA_RT_CALL( cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<tpb, 16, P, num_blocks> ),
+                                            blocks_per_grid,
+                                            threads_per_block,
+                                            args,
+                                            0,
+                                            cuda_stream ) );
+        } else {
+            CUDA_RT_CALL( cudaLaunchKernel( reinterpret_cast<void *>( &permute_shared<tpb, 32, P, num_blocks> ),
+                                            blocks_per_grid,
+                                            threads_per_block,
+                                            args,
+                                            0,
+                                            cuda_stream ) );
         }
     }
 
