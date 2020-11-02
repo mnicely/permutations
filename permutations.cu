@@ -93,33 +93,33 @@ constexpr size_t factorial( const size_t &n ) {
     return ( n <= 1 ) ? 1 : ( n * factorial( n - 1 ) );
 }
 
-constexpr int tpb { 256 };
+constexpr int tpb { 128 };
 constexpr int ws { 32 };
 
 template<typename T, typename U, uint TPB, uint P, size_t LAST_BLOCK>
-__global__ void __launch_bounds__( TPB ) permute_shared( const U n, const U r_n, T *output ) {
+__global__ void __launch_bounds__( TPB ) permute_shared( const size_t n, const size_t r_n, T *output ) {
 
     const auto block { cg::this_thread_block( ) };
     const auto tile32 { cg::tiled_partition<ws>( block ) };
 
-    U tid { blockIdx.x * blockDim.x + threadIdx.x };
-    U stride { blockDim.x * gridDim.x };
-    U block_id { blockIdx.x };
+    size_t tid { blockIdx.x * blockDim.x + threadIdx.x };
+    size_t stride { blockDim.x * gridDim.x };
+    size_t block_id { blockIdx.x };
 
     __shared__ unsigned char s[P * TPB];
 
-    for ( U gid = tid; gid < r_n; gid += stride ) {
+    for ( size_t gid = tid; gid < r_n; gid += stride ) {
 
         // Reset shared memory
-        for ( U i = 0; i < P; i++ ) {
-            s[i * TPB + threadIdx.x] = 0;
+        for ( int i = 0; i < P; i++ ) {
+            s[i * TPB + block.thread_rank( )] = 0;
         }
         block.sync( );
 
         // Compute factoradic
         if ( gid < n ) {
 
-            U quo { gid };
+            size_t quo { gid };
             s[block.thread_rank( ) * P + ( P - 1 )] = 0;
 
 #pragma unroll
@@ -129,6 +129,14 @@ __global__ void __launch_bounds__( TPB ) permute_shared( const U n, const U r_n,
             }
         }
         block.sync( );
+
+        // if (gid == 1){
+        //     for ( int i = 0; i < P; i++ ) {
+        //         printf("3 - %d: %d\n", block.thread_rank( ) * P + i, s[block.thread_rank( ) * P + i]);
+        //     }
+        //     printf("\n");
+        // }
+        // block.sync( );
 
         // Compute lehmer code : Each set gets a single warp
         for ( int w = tile32.meta_group_rank( ); w < TPB; w += tile32.meta_group_size( ) ) {
@@ -154,54 +162,31 @@ __global__ void __launch_bounds__( TPB ) permute_shared( const U n, const U r_n,
         }
         block.sync( );
 
-        // if ( gid == ( n - 10 ) ) {
-        //     for ( int g = 0; g < 10; g++ ) {
-        //         printf( "%d: %d ", gid + g, ( block.thread_rank( ) + g ) );
-        //         for ( int p = 0; p < P; p++ ) {
-        //             printf( "%d", s[( block.thread_rank( ) + g ) * P + p] );
-        //         }
-        //         printf( "\n" );
-        //     }
-        // }
-
+        // Store
+        size_t return_loc { block_id * P * TPB };
         if ( block_id != LAST_BLOCK ) {
 #pragma unroll
             for ( int p = 0; p < P; p++ ) {
-                output[( block_id * P * TPB ) + ( p * TPB ) + block.thread_rank( )] = s[p * TPB + block.thread_rank( )];
+                output[return_loc + ( p * TPB ) + block.thread_rank( )] = s[p * TPB + block.thread_rank( )];
             }
         } else {
-            uint block_size { TPB - ( r_n - n ) };
-            // if ( block.thread_rank( ) == 0 )
-            //     printf( "block_size %d\n", TPB - ( r_n - n ) );
-
-            // if ( block.thread_rank( ) < block_size )
-            //     printf( "%d: %d%d%d%d%d%d\n",
-            //             block.thread_rank( ),
-            //             s[block.thread_rank( ) * P + 0],
-            //             s[block.thread_rank( ) * P + 1],
-            //             s[block.thread_rank( ) * P + 2],
-            //             s[block.thread_rank( ) * P + 3],
-            //             s[block.thread_rank( ) * P + 4],
-            //             s[block.thread_rank( ) * P + 5] );
+            size_t block_size { TPB - ( r_n - n ) };
 
             if ( block.thread_rank( ) < block_size ) {
 #pragma unroll
                 for ( int p = 0; p < P; p++ ) {
-                    output[( block_id * P * TPB ) + ( p * block_size ) + block.thread_rank( )] =
+                    output[return_loc + ( p * block_size ) + block.thread_rank( )] =
                         s[p * block_size + block.thread_rank( )];
                 }
             }
         }
 
-        // if ( gid > ( n - 10 ) && gid < n )
-        // printf( "L %d: %d%d%d%d\n",
-        //         gid,
-        //         s[block.thread_rank( ) * ws + 3],
-        //         s[block.thread_rank( ) * ws + 2],
-        //         s[block.thread_rank( ) * ws + 1],
-        //         s[block.thread_rank( ) * ws + 0] );
-
-        // Store
+        // if (gid == 1){
+        //     for ( int p = 0; p < P; p++ ) {
+        //         printf("4 - %d: %d : %d\n", block.thread_rank( ) * P + p, s[block.thread_rank( ) * P + p], output[block.thread_rank( ) * P + p]);
+        //     }
+        //     printf("\n");
+        // }
 
         block_id += gridDim.x;
     }
@@ -265,7 +250,7 @@ int main( int argc, char **argv ) {
 
     using dtype = unsigned char;
 
-    const uint   P { 10 };               // Cap at 32
+    const uint   P { 12 };               // Cap at 32
     const size_t N { factorial( P ) };  // Number of sets, each set P values
 
     printf( "N = %lu\n", N );
@@ -282,7 +267,6 @@ int main( int argc, char **argv ) {
     CUDA_RT_CALL( cudaDeviceGetAttribute( &sm_count, cudaDevAttrMultiProcessorCount, device ) );
 
     blocks_per_grid = sm_count * 32;
-    // blocks_per_grid = 1;
 
     std::vector<dtype> h_key( N * P );
 
@@ -294,26 +278,28 @@ int main( int argc, char **argv ) {
         std::printf( "%d ", i );
     std::printf( "\n" );
 
-    // printf( "\nCPU\n" );
-    // auto start = std::chrono::high_resolution_clock::now( );
+    printf( "\nCPU\n" );
+    auto start = std::chrono::high_resolution_clock::now( );
 
-    // findPermutations<dtype, P>( N, h_seq, h_key );
+    findPermutations<dtype, P>( N, h_seq, h_key );
 
-    // auto                                      stop           = std::chrono::high_resolution_clock::now( );
-    // std::chrono::duration<double, std::milli> elapsed_cpu_ms = stop - start;
-    // std::printf( "%0.2f ms\n", elapsed_cpu_ms.count( ) );
+    auto                                      stop           = std::chrono::high_resolution_clock::now( );
+    std::chrono::duration<double, std::milli> elapsed_cpu_ms = stop - start;
+    std::printf( "%0.2f ms\n", elapsed_cpu_ms.count( ) );
 
-    // for ( int i = 0; i < N; i++ ) {
-    //     for ( int j = 0; j < P; j++ ) {
-    //         std::printf( "%d", h_key[i * P + j] );
-    //     }
-    //     std::printf( "\n" );
-    // }
+    for ( int i = (N-10); i < N; i++ ) {
+        for ( int j = 0; j < P; j++ ) {
+            std::printf( "%d", h_key[i * P + j] );
+        }
+        std::printf( "\n" );
+    }
 
-    // std::printf( "\n" );
+    std::printf( "\n" );
 
+    size_t size_bytes { N * P * sizeof( dtype ) };
     std::vector<dtype>    h_data( N * P );
     UniquePagedPtr<dtype> d_data { PagedAllocate<dtype>( N * P ) };
+    // CUDA_RT_CALL( cudaMemsetAsync( d_data.get( ), 0, size_bytes, cuda_stream ) );
 
     const size_t num_blocks { static_cast<size_t>( N / tpb ) };
     const size_t pad_N { ( num_blocks + 1 ) * tpb };
@@ -334,17 +320,17 @@ int main( int argc, char **argv ) {
     }
 
     CUDA_RT_CALL( cudaMemcpyAsync(
-        h_data.data( ), d_data.get( ), N * P * sizeof( dtype ), cudaMemcpyDeviceToHost, cuda_stream ) );
+        h_data.data( ), d_data.get( ), size_bytes, cudaMemcpyDeviceToHost, cuda_stream ) );
 
     CUDA_RT_CALL( cudaDeviceSynchronize( ) );
 
-    // std::printf( "\nGPU\n" );
-    // for ( int i = 0; i < N; i++ ) {
-    //     for ( int j = 0; j < P; j++ ) {
-    //         std::printf( "%d", h_data[i * P + j] );
-    //     }
-    //     std::printf( "\n" );
-    // }
+    std::printf( "\nGPU\n" );
+    for ( int i = (N-10); i < N; i++ ) {
+        for ( int j = 0; j < P; j++ ) {
+            std::printf( "%d", h_data[i * P + j] );
+        }
+        std::printf( "\n" );
+    }
 
     verify<dtype, P>(N, h_seq, h_data.data( ));
 
